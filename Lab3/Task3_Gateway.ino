@@ -1,3 +1,10 @@
+/*
+ * Task 3 - Gateway
+ * Receives and validates ultrasonic distance readings from the sensor
+ * node and uploads the latest valid measurement to ThingSpeak
+ * approximately every 20 seconds using HTTPS POST.
+ */
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -20,6 +27,7 @@ bool hasReading = false;
 unsigned long receivedAt = 0;
 unsigned long lastUpload = 0;
 
+// Receive and validate distance measurements from the sensor node
 void handleSensor() {
   JsonDocument doc;
 
@@ -37,11 +45,13 @@ void handleSensor() {
 
   float distance = value.as<float>();
 
+  // Accept only finite distances within the sensor's valid range
   if (!isfinite(distance) || distance < 2 || distance > 400) {
     server.send(400, "application/json", "{\"error\":\"Distance out of range\"}");
     return;
   }
 
+  // Store the latest valid reading and its reception time
   latestDistance = distance;
   receivedAt = millis();
   hasReading = true;
@@ -53,12 +63,16 @@ void handleSensor() {
   server.send(200, "application/json", "{\"status\":\"ok\"}");
 }
 
+// Upload the latest valid distance measurement to ThingSpeak
 void uploadToThingSpeak() {
   if (WiFi.status() != WL_CONNECTED || !hasReading) return;
 
+  // Do not upload stale measurements
   if (millis() - receivedAt > 15000) return;
 
   WiFiClientSecure client;
+
+  // Disable certificate verification for initial lab testing
   client.setInsecure();
 
   HTTPClient http;
@@ -71,8 +85,10 @@ void uploadToThingSpeak() {
 
   http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
+  // Prepare ThingSpeak API key and distance field
   String payload = "api_key=" + String(writeAPIKey) + "&field1=" + String(latestDistance, 2);
 
+  // Upload the measurement using HTTPS POST
   int status = http.POST(payload);
   String response = http.getString();
   response.trim();
@@ -83,6 +99,7 @@ void uploadToThingSpeak() {
   Serial.print("ThingSpeak response: ");
   Serial.println(response);
 
+  // A positive entry ID confirms a successful upload
   if (status == 200 && response.toInt() > 0) {
     Serial.println("Upload successful");
   } else {
@@ -95,11 +112,13 @@ void uploadToThingSpeak() {
 void setup() {
   Serial.begin(115200);
 
+  // Configure the gateway as both AP and STA
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(apSSID, apPassword, 1, 0, 2);
   WiFi.begin(staSSID, staPassword);
   WiFi.setAutoReconnect(true);
 
+  // Start the HTTP server for incoming sensor data
   server.on("/api/sensor", HTTP_POST, handleSensor);
   server.begin();
 
@@ -108,8 +127,10 @@ void setup() {
 }
 
 void loop() {
+  // Handle local sensor requests
   server.handleClient();
 
+  // Attempt upstream Wi-Fi reconnection when disconnected
   static unsigned long lastReconnect = 0;
 
   if (WiFi.status() != WL_CONNECTED &&
@@ -118,6 +139,7 @@ void loop() {
     WiFi.reconnect();
   }
 
+  // Display the gateway STA IP after connecting
   static bool printedIP = false;
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -130,6 +152,7 @@ void loop() {
     printedIP = false;
   }
 
+  // Upload the latest valid measurement every 20 seconds
   if (millis() - lastUpload >= 20000) {
     lastUpload = millis();
     uploadToThingSpeak();
