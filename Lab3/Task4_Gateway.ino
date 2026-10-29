@@ -1,3 +1,11 @@
+/*
+ * Task 4 - Gateway
+ * Uploads ultrasonic distance measurements to ThingSpeak and polls
+ * for remote LED-control commands. Valid commands are forwarded to
+ * the sensor node, and acknowledgments are used to prevent repeated
+ * execution of successfully completed commands.
+ */
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -30,6 +38,7 @@ unsigned long lastUpload = 0;
 unsigned long lastPoll = 0;
 unsigned long lastReconnect = 0;
 
+// Receive sensor measurements and identify the sensor node's IP
 void handleSensor() {
   JsonDocument doc;
 
@@ -40,6 +49,7 @@ void handleSensor() {
 
   JsonVariantConst value = doc["distance"];
 
+  // Validate the distance before storing it
   if ((!value.is<float>() && !value.is<int>()) || !isfinite(value.as<float>()) || value.as<float>() < 2 || value.as<float>() > 400) {
     server.send(400, "application/json", "{\"error\":\"Invalid distance\"}");
     return;
@@ -49,6 +59,7 @@ void handleSensor() {
   receivedAt = millis();
   hasReading = true;
 
+  // Obtain the sensor node IP from the incoming HTTP request
   sensorIP = server.client().remoteIP();
   sensorKnown = true;
 
@@ -57,11 +68,16 @@ void handleSensor() {
   server.send(200, "application/json", "{\"status\":\"ok\"}");
 }
 
+// Upload the latest valid measurement to ThingSpeak
 void uploadDistance() {
   if (WiFi.status() != WL_CONNECTED || !hasReading) return;
+
+  // Skip readings older than 15 seconds
   if (millis() - receivedAt > 15000) return;
 
   WiFiClientSecure client;
+
+  // Disable certificate verification for initial lab testing
   client.setInsecure();
 
   HTTPClient http;
@@ -74,6 +90,7 @@ void uploadDistance() {
 
   String payload = "api_key=" + String(sensorWriteKey) + "&field1=" + String(latestDistance, 2);
 
+  // Send the measurement to the Sensor Data channel
   int status = http.POST(payload);
   String response = http.getString();
   response.trim();
@@ -83,6 +100,7 @@ void uploadDistance() {
   http.end();
 }
 
+// Forward an LED command and verify the sensor node acknowledgment
 bool forwardLED(int id, int r, int g, int b) {
   if (!sensorKnown) {
     Serial.println("Sensor IP not known yet");
@@ -98,6 +116,7 @@ bool forwardLED(int id, int r, int g, int b) {
 
   http.addHeader("Content-Type", "application/json");
 
+  // Prepare the LED index and RGB values as JSON
   JsonDocument doc;
   doc["index"] = id;
   doc["r"] = r;
@@ -107,6 +126,7 @@ bool forwardLED(int id, int r, int g, int b) {
   String payload;
   serializeJson(doc, payload);
 
+  // Forward the command to the sensor node
   int status = http.POST(payload);
   String response = http.getString();
 
@@ -117,6 +137,7 @@ bool forwardLED(int id, int r, int g, int b) {
     return false;
   }
 
+  // Verify that the sensor node executed the correct command
   JsonDocument ack;
 
   if (deserializeJson(ack, response) || ack["status"] != "ok" || !ack["index"].is<int>() || ack["index"].as<int>() != id) {
@@ -127,6 +148,7 @@ bool forwardLED(int id, int r, int g, int b) {
   return true;
 }
 
+// Retrieve the latest LED-control command from ThingSpeak
 void pollLED() {
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -140,6 +162,7 @@ void pollLED() {
 
   if (!http.begin(client, url)) return;
 
+  // Request the latest command using HTTPS GET
   int status = http.GET();
   String response = http.getString();
   http.end();
@@ -160,16 +183,19 @@ void pollLED() {
   String indexText = doc["field1"].as<String>();
   String colorText = doc["field2"].as<String>();
 
+  // Validate the command ID, LED index and colour code
   if (entry <= 0 || indexText.length() != 1 || colorText.length() != 1 || indexText[0] < '0' || indexText[0] > '7' || colorText[0] < '0' || colorText[0] > '3') {
     Serial.println("Invalid cloud command");
     return;
   }
 
+  // Ignore commands that have already been completed
   if (entry <= lastCompletedEntry) return;
 
   int id = indexText.toInt();
   int color = colorText.toInt();
 
+  // Convert colour code into RGB values
   int r = 0, g = 0, b = 0;
 
   if (color == 1) r = 255;
@@ -178,6 +204,7 @@ void pollLED() {
 
   Serial.printf("Command: entry=%ld LED=%d color=%d\n", entry, id, color);
 
+  // Mark completed only after a successful acknowledgment
   if (forwardLED(id, r, g, b)) {
     lastCompletedEntry = entry;
     Serial.println("LED updated successfully");
@@ -189,11 +216,13 @@ void pollLED() {
 void setup() {
   Serial.begin(115200);
 
+  // Enable local AP and upstream STA connectivity
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(apSSID, apPassword, 1, 0, 2);
   WiFi.begin(staSSID, staPassword);
   WiFi.setAutoReconnect(true);
 
+  // Register the local sensor endpoint
   server.on("/api/sensor", HTTP_POST, handleSensor);
   server.begin();
 
@@ -202,13 +231,16 @@ void setup() {
 }
 
 void loop() {
+  // Process incoming sensor measurements
   server.handleClient();
 
+  // Reconnect to the upstream network when necessary
   if (WiFi.status() != WL_CONNECTED && millis() - lastReconnect >= 5000) {
     lastReconnect = millis();
     WiFi.reconnect();
   }
 
+  // Display the gateway STA IP when connected
   static bool printedIP = false;
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -221,11 +253,13 @@ void loop() {
     printedIP = false;
   }
 
+  // Upload sensor data every 20 seconds
   if (millis() - lastUpload >= 20000) {
     lastUpload = millis();
     uploadDistance();
   }
 
+  // Check ThingSpeak for LED commands every 5 seconds
   if (millis() - lastPoll >= 5000) {
     lastPoll = millis();
     pollLED();
